@@ -1,0 +1,5 @@
+requests>=2.31,<3
+numpy>=1.26,<3
+biopython>=1.86,<2
+gemmi>=0.7,<1
+rdkit>=2024.3

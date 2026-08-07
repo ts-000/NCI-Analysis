@@ -1,0 +1,12 @@
+name: biomotif-pipeline
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - requests>=2.31
+  - numpy>=1.26
+  - biopython>=1.86
+  - gemmi>=0.7
+  - rdkit>=2024.03
+  - dssp
+  - pip

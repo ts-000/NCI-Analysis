@@ -1,0 +1,40 @@
+[project]
+name = "biomolecular-motifs"
+protein_target = 100
+candidate_pool = 2000
+workers = 8
+
+[stage1.protein]
+resolution_max = 2.0
+rfree_max = 0.25
+min_length = 30
+sequence_cluster_identity = 30
+
+[stage2]
+peptide_bond_max = 1.90
+npi_distance_max = 3.20
+npi_angle_min = 99.0
+npi_angle_max = 119.0
+npi_border_distance = 0.15
+npi_border_angle = 10.0
+beta_turn_ca_max = 7.0
+beta_turn_tolerance = 35.0
+gamma_turn_ca_max = 6.0
+gamma_turn_on_max = 3.5
+gamma_turn_tolerance = 35.0
+collagen_min_length = 6
+collagen_gly_fraction = 0.60
+local_min_occupancy = 0.90
+
+[stage3.selection]
+max_per_motif = 0
+
+[stage3.quality]
+min_occupancy = 0.90
+preferred_atoms = 100
+maximum_atoms = 150
+
+[stage3.preparation]
+fallback_ph = 7.0
+water_oxygen_distance = 3.5
+hydrogen_caps = true
