@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite this repository."
+title: "NCI-Analysis"
+type: software
+authors:
+  - family-names: "Saxena"
+    given-names: "Taksheel"
+repository-code: "https://github.com/ts-000/NCI-Analysis"
+version: "1.0.0"
+date-released: "2026-08-26"
+abstract: >-
+  Computational workflows and custom scripts for extracting, geometrically
+  characterizing, and analysing NBO noncovalent interactions.
