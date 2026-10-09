@@ -40,8 +40,8 @@ TURN_TARGETS = {
     "beta_turn_II_prime": (60.0, -120.0, -80.0, 0.0),
 }
 GAMMA_TARGETS = {
-    "gamma_turn_classic": (-70.0, 60.0),
-    "gamma_turn_inverse": (70.0, -60.0),
+    "gamma_turn_classic": (70.0, -60.0),
+    "gamma_turn_inverse": (-70.0, 60.0),
 }
 
 
@@ -91,6 +91,7 @@ class ProteinResidue:
     dssp_code: str = "-"
     dssp_index: int | None = None
     dssp_hbond_offsets: list[int] = field(default_factory=list)
+    dssp_hbonds: list[dict[str, Any]] = field(default_factory=list)
     relative_asa: float | None = None
     connected_prev: bool = False
     connected_next: bool = False
@@ -264,6 +265,7 @@ def assign_dssp(
         residue.dssp_code = str(data[2]).strip() or "-"
         residue.relative_asa = safe_float(data[3])
         offsets: list[int] = []
+        hbonds: list[dict[str, Any]] = []
         for position in (6, 8, 10, 12):
             try:
                 offset = int(data[position])
@@ -271,7 +273,14 @@ def assign_dssp(
                 continue
             if offset:
                 offsets.append(offset)
+                energy = safe_float(data[position + 1]) if position + 1 < len(data) else None
+                hbonds.append({
+                    "partner_offset": offset,
+                    "role": "donor" if position in (6, 10) else "acceptor",
+                    "energy_kcal_mol": energy,
+                })
         residue.dssp_hbond_offsets = offsets
+        residue.dssp_hbonds = hbonds
 
 
 def contiguous(residues: Sequence[ProteinResidue], code: str) -> list[list[ProteinResidue]]:
@@ -533,6 +542,8 @@ def annotate_turn_sites(
                 continue
             if not all("CA" in residue.atoms for residue in window):
                 continue
+            if any(residue.dssp_code in HELIX_CODES for residue in window[1:3]):
+                continue
             ca_distance = distance(window[0].atoms["CA"].coord, window[3].atoms["CA"].coord)
             if ca_distance > cfg.beta_turn_ca_max:
                 continue
@@ -540,10 +551,15 @@ def annotate_turn_sites(
             if any(value is None for value in torsions):
                 continue
             numeric = tuple(float(value) for value in torsions if value is not None)
-            rms, motif_type = min(
-                (circular_rms(numeric, target), name)
-                for name, target in TURN_TARGETS.items()
-            )
+            matches = []
+            for name, target in TURN_TARGETS.items():
+                deviations = [abs((value - ideal + 180.0) % 360.0 - 180.0) for value, ideal in zip(numeric, target)]
+                ordered = sorted(deviations)
+                if ordered[-1] <= 40.0 and ordered[-2] <= 30.0:
+                    matches.append((circular_rms(numeric, target), name, deviations))
+            if not matches:
+                continue
+            rms, motif_type, deviations = min(matches)
             if rms > cfg.beta_turn_tolerance:
                 continue
             sites.append(
@@ -557,6 +573,8 @@ def annotate_turn_sites(
                         "turn_parameters": {
                             "ca_i_i3_distance_A": ca_distance,
                             "torsion_rms_deg": rms,
+                            "canonical_angle_deviations_deg": deviations,
+                            "central_dssp_codes": [residue.dssp_code for residue in window[1:3]],
                             "phi2_deg": torsions[0],
                             "psi2_deg": torsions[1],
                             "phi3_deg": torsions[2],
@@ -668,21 +686,58 @@ def annotate_beta_sheet_sites(
             continue
         dot = float(np.dot(first_direction, second_direction))
         motif_type = "beta_sheet_parallel" if dot >= 0 else "beta_sheet_antiparallel"
+        first_unit = _local_peptide_unit(first, chain_first)
+        second_unit = _local_peptide_unit(second, chain_second)
+        first_keys = {residue.key for residue in first_unit}
+        second_keys = {residue.key for residue in second_unit}
+        if first_keys & second_keys:
+            continue
         residues: list[ProteinResidue] = []
-        for residue in _local_peptide_unit(first, chain_first) + _local_peptide_unit(second, chain_second):
+        for residue in first_unit + second_unit:
             if residue.key not in {item.key for item in residues}:
                 residues.append(residue)
+        retained_keys = first_keys | second_keys
+        directed: dict[tuple[Any, Any], dict[str, Any]] = {}
+        for residue in residues:
+            for bond in residue.dssp_hbonds:
+                partner = by_dssp.get(residue.dssp_index + bond["partner_offset"])
+                energy = bond.get("energy_kcal_mol")
+                if partner is None or partner.key not in retained_keys or energy is None or energy >= -0.5:
+                    continue
+                if (residue.key in first_keys) == (partner.key in first_keys):
+                    continue
+                donor, acceptor = (residue, partner) if bond["role"] == "donor" else (partner, residue)
+                if donor.resname == "PRO" or "N" not in donor.atoms or "O" not in acceptor.atoms:
+                    continue
+                separation = distance(donor.atoms["N"].coord, acceptor.atoms["O"].coord)
+                if separation > 3.5:
+                    continue
+                pair = (donor.key, acceptor.key)
+                item = {
+                    "donor": {**donor.selector, "atom_name": "N"},
+                    "acceptor": {**acceptor.selector, "atom_name": "O"},
+                    "energy_kcal_mol": energy,
+                    "n_o_distance_A": separation,
+                }
+                if pair not in directed or energy < directed[pair]["energy_kcal_mol"]:
+                    directed[pair] = item
+        hbonds = [directed[key] for key in sorted(directed)]
+        if not hbonds:
+            continue
         central_atoms = []
-        for donor, acceptor in ((first, second), (second, first)):
-            if "O" in donor.atoms and "N" in acceptor.atoms:
-                central_atoms.extend([
-                    {**donor.selector, "atom_name": "O"},
-                    {**acceptor.selector, "atom_name": "N"},
-                ])
+        seen_atoms: set[tuple[Any, ...]] = set()
+        for bond in hbonds:
+            for selector in (bond["donor"], bond["acceptor"]):
+                key = (selector["chain_id"], selector["seq_id"], selector["insertion_code"], selector["atom_name"])
+                if key not in seen_atoms:
+                    central_atoms.append(selector)
+                    seen_atoms.add(key)
         geometry = {
             "strand_axis_dot": dot,
             "orientation": "parallel" if dot >= 0 else "antiparallel",
-            "dssp_hbond_pair": [first.selector, second.selector],
+            "dssp_candidate_pair": [first.selector, second.selector],
+            "dssp_hbond_pair": [hbonds[0]["donor"], hbonds[0]["acceptor"]],
+            "dssp_hydrogen_bonds": hbonds,
             "ca_distance_A": (
                 distance(first.atoms["CA"].coord, second.atoms["CA"].coord)
                 if "CA" in first.atoms and "CA" in second.atoms

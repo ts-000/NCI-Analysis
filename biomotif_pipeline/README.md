@@ -4,7 +4,7 @@ A workflow for collecting high-quality crystal structures, annotating selected b
 
 The code keeps the three stages separate:
 
-1. **Collect** a nonredundant RCSB protein set.
+1. **Collect** an RCSB protein set deduplicated by entry-level cluster combinations.
 2. **Annotate** approved motifs with DSSP and local geometry.
 3. **Prepare** capped, hydrogenated fragments while preserving deposited heavy-atom coordinates.
 
@@ -47,7 +47,10 @@ Default filters are set in `config.toml`:
 - R-free at or below 0.25
 - missing R-free rejected
 - minimum protein length of 30 residues
-- 30% RCSB sequence-cluster de-redundancy
+- entry-level deduplication by the combination of 30% RCSB protein-entity clusters
+
+Two selected entries can share an individual entity cluster if their full cluster
+combinations differ. Stage 1 does not guarantee global entity-level nonredundancy.
 
 Stage 1 writes the selected manifest under:
 
@@ -77,6 +80,15 @@ stage2_annotations/errors.json
 ```
 
 A Stage-2 site is a structural/geometric assignment.
+
+Beta turns require nonhelical central residues and canonical torsions: three
+angular deviations at most 30 degrees and the fourth at most 40 degrees, in
+addition to the existing C-alpha and configured RMS limits. Classic gamma turns
+have positive phi/negative psi; inverse gamma turns have negative phi/positive psi.
+Sheet windows retain the existing collection scheme, but require an actual retained
+cross-strand DSSP hydrogen bond (energy below -0.5 kcal/mol and N...O at most 3.5 A).
+Metadata records its direction and energy without assuming a reciprocal bond.
+Reannotate old Stage-2 registries to apply these classification corrections.
 
 ### Stage 3 — prepare local fragments
 
@@ -108,3 +120,35 @@ validation_report.json
 ```
 
 The heavy atoms retain their deposited coordinates. Artificial peptide cuts receive hydrogen link caps. Added hydrogens are movable in `gaussian_coordinates.txt`; heavy atoms are marked frozen.
+
+`cap_report.json` and the `boundary_affected`/`boundary_type` columns in
+`atom_map.csv` identify the directly altered boundary heavy atoms. H caps can
+produce boundary amines and aldehydes; they remain the existing approximation.
+Environment reports include nearby neutral protein residues and ligands as well
+as waters (including DOD), ions (including CU), and charged residues. Reporting
+does not automatically add those neighbours to the fragment.
+Minimum contact distances use deposited heavy atoms, excluding H/D. A listed
+contact or "strong" geometry label does not establish an NBO energy.
+
+Unverified polymer endpoints, disulfide-linked CYS, and neutral ARG above pH 12.5
+are rejected for manual preparation instead of guessing unsupported chemistry.
+PDB hydrogen names are unique within each residue; Gaussian atom order, labels,
+freeze flags, and the capping/hydrogenation procedure are preserved.
+
+Verify installation and run the protein-only regression tests with:
+
+```bash
+python verify_install.py --dssp mkdssp
+python tests/selftest.py
+```
+
+The optional protein-only helper can rank prepared sites and write Gaussian input
+files using the existing settings; it is not part of the three-stage launcher:
+
+```bash
+python select_gaussian_candidates_v2.py --stage3 stage3_fragments --max-files-per-motif 1
+```
+
+Its shortlist requires explicit successful validation and matching atom maps/freeze
+masks, and uses deposited metadata for occupancy/B factors. Review motif identity,
+boundary chemistry, and omitted environment before choosing a representative.

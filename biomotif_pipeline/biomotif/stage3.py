@@ -30,8 +30,8 @@ STANDARD_PROTEIN = {
     "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
     "MSE", "HYP",
 }
-WATER_NAMES = {"HOH", "WAT", "H2O"}
-ION_NAMES = {"NA", "K", "LI", "MG", "CA", "ZN", "CL"}
+WATER_NAMES = {"HOH", "WAT", "H2O", "DOD"}
+ION_NAMES = {"NA", "K", "LI", "MG", "CA", "ZN", "CL", "CU"}
 CHARGED_RESIDUES = {"ASP", "GLU", "LYS", "ARG", "HIS", "CYS", "TYR"}
 ATOMIC_NUMBERS = {
     "H": 1, "C": 6, "N": 7, "O": 8, "F": 9, "P": 15, "S": 16,
@@ -245,7 +245,37 @@ class SourceIndex:
         end = positions[block[-1]]
         previous = ordered[start - 1] if start > 0 and self.peptide_connected(ordered[start - 1], block[0]) else None
         following = ordered[end + 1] if end + 1 < len(ordered) and self.peptide_connected(block[-1], ordered[end + 1]) else None
+        for key, neighbor, side in ((block[0], previous, "N"), (block[-1], following, "C")):
+            if neighbor is not None:
+                continue
+            residue = self.residues[key]["gemmi_residue"]
+            entity = next((item for item in self.structure.entities if residue.subchain in item.subchains), None)
+            length = len(entity.full_sequence) if entity is not None else 0
+            position = residue.label_seq
+            if not length or position is None or position != (1 if side == "N" else length):
+                raise PreparationError(
+                    "ambiguous_polymer_endpoint",
+                    f"{side}-side endpoint at {key} is not a verified deposited sequence terminus; manual review required",
+                )
         return previous, following
+
+    def has_disulfide(self, key: tuple[str, int, str]) -> bool:
+        sulfur = self.atom(key, "SG")
+        if sulfur is None:
+            return False
+        for connection in self.structure.connections:
+            if connection.type != gemmi.ConnectionType.Disulf:
+                continue
+            for partner in (connection.partner1, connection.partner2):
+                address = (partner.chain_name, int(partner.res_id.seqid.num), str(partner.res_id.seqid.icode).strip())
+                if address == key and partner.atom_name.strip() == sulfur.atom_name:
+                    return True
+        return any(
+            other_key != key and record["resname"] == "CYS"
+            and (other := self.atom(other_key, "SG")) is not None
+            and distance(sulfur.coord, other.coord) <= 2.3
+            for other_key, record in self.residues.items()
+        )
 
     def write_subset_cif(self, keys: set[tuple[str, int, str]], destination: Path) -> None:
         out = gemmi.Structure()
@@ -288,12 +318,14 @@ class SourceIndex:
         waters: list[dict[str, Any]] = []
         ions: list[dict[str, Any]] = []
         charged: list[dict[str, Any]] = []
+        protein: list[dict[str, Any]] = []
+        ligands: list[dict[str, Any]] = []
         if not centers:
-            centers = [atom.coord for atom in self.selected_atoms(selected) if atom.element != "H"]
+            centers = [atom.coord for atom in self.selected_atoms(selected) if atom.element not in {"H", "D"}]
         for key, record in self.residues.items():
             if key in selected:
                 continue
-            atoms = list(record["atoms"].values())
+            atoms = [atom for atom in record["atoms"].values() if atom.element not in {"H", "D"}]
             if not atoms or not centers:
                 continue
             minimum = min(distance(atom.coord, center) for atom in atoms for center in centers)
@@ -301,16 +333,29 @@ class SourceIndex:
                 "chain_id": key[0], "seq_id": key[1], "insertion_code": key[2],
                 "resname": record["resname"], "minimum_distance_A": minimum,
             }
-            if record["resname"] in WATER_NAMES and minimum <= water_cutoff:
+            is_water = record["resname"] in WATER_NAMES or record["gemmi_residue"].entity_type == gemmi.EntityType.Water
+            is_ion = record["resname"] in ION_NAMES or (
+                record["gemmi_residue"].entity_type != gemmi.EntityType.Polymer
+                and record["resname"] not in STANDARD_PROTEIN
+                and len(atoms) == 1 and atoms[0].element not in {"C", "N", "O", "S", "P"}
+            )
+            if is_water and minimum <= water_cutoff:
                 waters.append(item)
-            elif record["resname"] in ION_NAMES and minimum <= 5.0:
+            elif is_ion and minimum <= 5.0:
                 ions.append(item)
             elif record["resname"] in CHARGED_RESIDUES and minimum <= 5.0:
                 charged.append(item)
+            if not is_water and not is_ion and minimum <= 5.0:
+                if record["gemmi_residue"].entity_type == gemmi.EntityType.Polymer or record["resname"] in STANDARD_PROTEIN:
+                    protein.append(item)
+                else:
+                    ligands.append(item)
         return {
             "nearby_waters": sorted(waters, key=lambda item: item["minimum_distance_A"]),
             "nearby_ions": sorted(ions, key=lambda item: item["minimum_distance_A"]),
             "nearby_charged_residues": sorted(charged, key=lambda item: item["minimum_distance_A"]),
+            "nearby_protein_residues": sorted(protein, key=lambda item: item["minimum_distance_A"]),
+            "nearby_ligands": sorted(ligands, key=lambda item: item["minimum_distance_A"]),
         }
 
 
@@ -412,6 +457,8 @@ def validate_local_site(
             )
         if resname in {"MSE", "HYP"}:
             modified.append(f"{key[0]}:{resname}{key[1]}{key[2]}")
+        if resname == "CYS" and source.has_disulfide(key):
+            raise PreparationError("unsupported_disulfide", f"disulfide-linked CYS at {key}; manual preparation required")
         for canonical in _required_atoms(resname):
             atom = source.atom(key, canonical)
             if atom is None:
@@ -520,6 +567,8 @@ def _configure_protonation(
             state["state"] = "LYS+" if protonated else "LYN"
         elif resname == "ARG":
             protonated = ph <= 12.5
+            if not protonated:
+                raise PreparationError("unsupported_neutral_arginine", f"neutral ARG at pH {ph:g} requires manual preparation at {key}")
             carbon = idx(key, "CZ")
             if carbon is not None and protonated:
                 rw.GetAtomWithIdx(carbon).SetFormalCharge(1)
@@ -725,6 +774,7 @@ def build_local_fragment(
             capped_records.append(record)
             cap_links.append({
                 "boundary_type": "artificial_N_side_peptide_cut",
+                "affected_heavy_atom_labels": [initial_records[mapped_index(block[0], "N")].label],
                 "selected_atom": f"{block[0]}:N",
                 "removed_external_atom": f"{previous}:C",
                 "link_hydrogen": record.label,
@@ -758,6 +808,7 @@ def build_local_fragment(
             capped_records.append(record)
             cap_links.append({
                 "boundary_type": "artificial_C_side_peptide_cut",
+                "affected_heavy_atom_labels": [initial_records[mapped_index(block[-1], name)].label for name in ("C", "O")],
                 "selected_atom": f"{block[-1]}:C",
                 "removed_external_atom": f"{following}:N",
                 "link_hydrogen": record.label,
@@ -823,6 +874,7 @@ def _prepared_atom_records(molecule: Chem.Mol, capped_atoms: Sequence[FragmentAt
     conformer = molecule.GetConformer()
     records = list(capped_atoms)
     hydrogen_counts: Counter[str] = Counter()
+    residue_hydrogen_counts: Counter[tuple[str, int, str]] = Counter()
     for index in range(len(capped_atoms), molecule.GetNumAtoms()):
         atom = molecule.GetAtomWithIdx(index)
         position = conformer.GetAtomPosition(index)
@@ -833,10 +885,12 @@ def _prepared_atom_records(molecule: Chem.Mol, capped_atoms: Sequence[FragmentAt
         neighbor = records[neighbor_index]
         base = neighbor.label or f"{neighbor.chain_id}:{neighbor.resname}{neighbor.seq_id}:{neighbor.atom_name}"
         hydrogen_counts[base] += 1
+        residue_key = (neighbor.chain_id, neighbor.seq_id, neighbor.insertion_code)
+        residue_hydrogen_counts[residue_key] += 1
         records.append(FragmentAtom(
             element="H",
             coord=np.array([position.x, position.y, position.z], dtype=float),
-            atom_name=f"H{hydrogen_counts[base]}",
+            atom_name=f"H{residue_hydrogen_counts[residue_key]}",
             chain_id=neighbor.chain_id,
             seq_id=neighbor.seq_id,
             insertion_code=neighbor.insertion_code,
@@ -950,6 +1004,11 @@ def write_fragment_outputs(
     gaussian_lines: list[str] = []
     atom_map: list[dict[str, Any]] = []
     freeze_mask: list[dict[str, Any]] = []
+    boundary_types = {
+        label: link["boundary_type"]
+        for link in reports.get("cap_report", {}).get("peptide_link_caps", [])
+        for label in link.get("affected_heavy_atom_labels", [])
+    }
     for index, atom in enumerate(prepared_atoms, 1):
         x, y, z = map(float, atom.coord)
         freeze_flag = 0 if atom.element == "H" else -1
@@ -970,6 +1029,8 @@ def write_fragment_outputs(
             "x": x,
             "y": y,
             "z": z,
+            "boundary_affected": atom.label in boundary_types,
+            "boundary_type": boundary_types.get(atom.label, ""),
         })
         freeze_mask.append({
             "fragment_index": index,

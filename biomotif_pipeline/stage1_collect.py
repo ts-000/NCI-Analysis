@@ -10,7 +10,7 @@ from biomotif.stage1 import BranchConfig, run_stage1
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Stage 1: collect a strict nonredundant protein set from RCSB.")
+    parser = argparse.ArgumentParser(description="Stage 1: collect proteins deduplicated by entry-level RCSB cluster combinations.")
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name("config.toml"))
     parser.add_argument("--output", type=Path, default=Path("stage1_gold"))
     parser.add_argument("--protein-target", type=int)
