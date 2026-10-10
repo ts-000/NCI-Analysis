@@ -162,6 +162,7 @@ def export_excel_playground(df_source, output_path):
         "show_error": False,
         }
         ws_summary.merge_range("A1:H1", "NCI Energy - Tabular Summary", title_fmt)
+        ws_summary.merge_range("A2:H2", "Averages include all possible interactions, with absent interactions counted as zero.")
         ws_summary.set_column("A:A", 22)
         ws_summary.set_column("B:H", 15)
 
@@ -423,7 +424,7 @@ COVALENT_RADII = {
 }
 MAX_VALENCE = {"H": 1, "F": 1, "Cl": 1, "Br": 1, "I": 1, "O": 2, "N": 4, "C": 4, "B": 3, "P": 5, "S": 6}
 LITERATURE_BOND_LENGTHS = {
-    ("C", "H", "single"): 1.09, ("N", "H", "single"): 1.01, ("O", "H", "single"): 0.96,
+    ("C", "H", "single"): 1.09, ("H", "N", "single"): 1.01, ("H", "O", "single"): 0.96,
     ("C", "C", "single"): 1.54, ("C", "C", "double"): 1.34,
     ("C", "N", "single"): 1.47, ("C", "N", "double"): 1.28,
     ("C", "O", "single"): 1.43, ("C", "O", "double"): 1.21,
@@ -432,8 +433,8 @@ LITERATURE_BOND_LENGTHS = {
 
 def parse_xyz_structure(path):
     with open(path, "r", encoding="utf-8") as fh:
-        lines = [ln.split() for ln in fh if ln.strip()]
-    start = 2 if lines and lines[0][0].isdigit() else 0
+        lines = [ln.split() for ln in fh]
+    start = 2 if lines and lines[0] and lines[0][0].isdigit() else 0
     return [(p[0], float(p[1]), float(p[2]), float(p[3])) for p in lines[start:] if len(p) >= 4]
 
 def parse_pdb_structure(path):
@@ -1041,13 +1042,13 @@ def _write_fig01_sheet(writer, used, all_df, core_df):
     ws = wb.add_worksheet(_safe_sheet_name("Fig01_E2", used))
     writer.sheets[ws.name] = ws
     fmts = _paper_formats(wb)
-    _write_title(ws, fmts, 0, "Figure 1 table: total E2 by interaction type/family/substituent", 21)
-    row = _write_note(ws, fmts, 1, "Total E2 only. All interactions use every interaction in mainframe with E2=0 when absent; core interactions restrict atom labels to ≤27.", 21) + 1
+    _write_title(ws, fmts, 0, "Family sums of total E2 by interaction type/substituent", 21)
+    row = _write_note(ws, fmts, 1, "Family totals sum N1+N2 or P1+P2; FIG_01 energy plots show mean totals per conformer. All interactions use every interaction in mainframe with E2=0 when absent; core interactions restrict atom labels to ≤27.", 21) + 1
     for typ in EXPECTED_MAJOR_TYPES:
         row = _write_side_by_side(
             ws, fmts, row,
-            f"All interactions: {typ} total E2", _family_matrix(all_df, typ),
-            f"Core interactions: {typ} total E2", _family_matrix(core_df, typ)
+            f"All interactions: {typ} family sum E2", _family_matrix(all_df, typ),
+            f"Core interactions: {typ} family sum E2", _family_matrix(core_df, typ)
         )
     ws.freeze_panes(3, 0)
 
@@ -1171,7 +1172,8 @@ def export_paper_tables_workbook(output_path):
 
 _safe_write_paper_workbook(os.path.join(PAPERTABLEDIR, PAPER_TABLE_WORKBOOK))
 
-type_conf = type_sample.groupby(["conformer", "conformer_family", "type_simple"], observed=False).agg(total_E2=("total_E2", "sum"), count_existing=("count_existing", "sum"), mean_E2=("mean_E2", "mean"), max_E2=("max_E2", "max")).reset_index()
+type_conf = type_sample.groupby(["conformer", "conformer_family", "type_simple"], observed=False).agg(total_E2=("total_E2", "sum"), count_existing=("count_existing", "sum"), max_E2=("max_E2", "max")).reset_index()
+type_conf["mean_E2"] = type_conf["total_E2"] / type_conf["count_existing"].replace(0, np.nan)
 type_conf["fraction_of_conformer_E2"] = type_conf["total_E2"] / type_conf.groupby("conformer")["total_E2"].transform("sum").replace(0, np.nan)
 
 
@@ -1428,18 +1430,18 @@ if non_types:
             if pd.notna(yi):
                 ax.annotate(f"{yi:.2f}", (xi, yi), xytext=(0, 7), textcoords="offset points", ha="center", fontsize=8)
 
-        valid = pd.DataFrame({"x_plot": x, "y": y}).dropna()
+        valid = pd.DataFrame({"x_plot": x, "sigma_p": g["substituent"].map(HAMMETT_SIGMA_P), "y": y}).dropna()
         if len(valid) >= 3:
-            r = float(np.corrcoef(valid["x_plot"], valid["y"])[0, 1]) if valid["x_plot"].nunique() > 1 and valid["y"].nunique() > 1 else np.nan
+            r = float(np.corrcoef(valid["sigma_p"], valid["y"])[0, 1]) if valid["sigma_p"].nunique() > 1 and valid["y"].nunique() > 1 else np.nan
             if pd.notna(r) and (r ** 2) > LINE_DETAIL_R_THRESHOLD:
-                slope, intercept = np.polyfit(valid["x_plot"], valid["y"], 1)
-                x_fit = np.array([valid["x_plot"].min(), valid["x_plot"].max()])
-                y_fit = slope * x_fit + intercept
+                slope, intercept = np.polyfit(valid["sigma_p"], valid["y"], 1)
+                x_fit = valid["x_plot"].to_numpy()
+                y_fit = slope * valid["sigma_p"].to_numpy() + intercept
                 ax.plot(x_fit, y_fit, linestyle="--", linewidth=1.7, alpha=0.90)
                 sign = "+" if slope >= 0 else "−"
                 ax.text(
                     0.02, 0.98,
-                    f"Strong EDG→EWG trend: R² = {r**2:.2f} ({sign})",
+                    f"Hammett fit: R² = {r**2:.2f} ({sign})",
                     transform=ax.transAxes, va="top", ha="left", fontsize=9,
                     bbox={"boxstyle": "round,pad=0.35", "facecolor": "white", "alpha": 0.86, "edgecolor": "#BBBBBB"}
                 )
@@ -2355,9 +2357,9 @@ save_figure_table(_select_cols(type_conf.sort_values(["conformer", "type_simple"
 type_conf_core_for_table = type_sample_core.groupby(["conformer", "conformer_family", "type_simple"], observed=False).agg(
     total_E2=("total_E2", "sum"),
     count_existing=("count_existing", "sum"),
-    mean_E2=("mean_E2", "mean"),
     max_E2=("max_E2", "max"),
 ).reset_index()
+type_conf_core_for_table["mean_E2"] = type_conf_core_for_table["total_E2"] / type_conf_core_for_table["count_existing"].replace(0, np.nan)
 type_conf_core_for_table["fraction_of_conformer_E2"] = type_conf_core_for_table["total_E2"] / type_conf_core_for_table.groupby("conformer")["total_E2"].transform("sum").replace(0, np.nan)
 save_figure_table(_select_cols(type_conf_core_for_table.sort_values(["conformer", "type_simple"]),
                                 ["conformer", "conformer_family", "type_simple", "total_E2", "count_existing", "mean_E2", "max_E2", "fraction_of_conformer_E2"]),
